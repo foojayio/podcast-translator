@@ -1,4 +1,4 @@
-# Media Translator Project Setup - Local & Open Source Edition
+# Podcast Translator Project
 
 This guide explains how to set up and run the fully open-source, locally-run MediaTranslator application which requires
 no cloud services.
