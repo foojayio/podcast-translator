@@ -1,4 +1,6 @@
-package io.foojay.podcast.translator;
+package io.foojay.podcast.translator.helper;
+
+import io.foojay.podcast.translator.MediaTranslator;
 
 import java.io.File;
 import java.io.FileInputStream;

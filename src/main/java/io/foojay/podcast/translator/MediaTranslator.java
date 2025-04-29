@@ -1,10 +1,14 @@
 package io.foojay.podcast.translator;
 
+import io.foojay.podcast.translator.helper.OllamaHelper;
+import io.foojay.podcast.translator.helper.Settings;
+import io.foojay.podcast.translator.helper.WhisperHelper;
 import org.json.JSONObject;
 
-import java.io.*;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -28,13 +32,40 @@ public class MediaTranslator {
 
         try {
             // Check if Ollama is running
-            if (!isOllamaRunning()) {
+            if (!OllamaHelper.isOllamaRunning()) {
                 System.out.println("Error: Ollama service is not running. Please start Ollama first.");
                 return;
             }
 
-            // Process the file
-            processMediaFile(settings);
+            // Original audio to transcription
+            boolean transcriptionSucceeded = WhisperHelper.transcribeAudio(settings);
+            if (!transcriptionSucceeded) {
+                System.err.println("Error: Transcription failed. Please check the log for details.");
+                return;
+            }
+
+            // Read the JSON output file
+            String jsonContent = new String(Files.readAllBytes(Paths.get(settings.getOutputTranscriptFile())), StandardCharsets.UTF_8);
+            JSONObject json = new JSONObject(jsonContent);
+
+            // Extract the transcribed text from the JSON
+            String transcribedText = json.get("transcription").toString();
+
+            //System.out.println("Transcription complete: " + transcribedText.substring(0, Math.min(100, transcribedText.length())) + "...");
+
+            // Optional: Enhance transcription with Ollama
+            String enhancedText = OllamaHelper.enhanceTranscriptionWithOllama(transcribedText, settings.getModel());
+            System.out.println("Transcription enhanced!");
+
+            // Translate text to target language using Ollama
+            String translatedText = OllamaHelper.translateTextWithOllama(enhancedText, settings.getInputLanguage(), settings.getOutputLanguage(), settings.getModel());
+            System.out.println("Translation complete: " + translatedText.substring(0, Math.min(100, translatedText.length())) + "...");
+
+            // Convert translated text to speech using locally installed TTS
+            generateSpeechWithLocalTTS(translatedText, settings.getOutputLanguage(), settings.getOutputAudioFile());
+            System.out.println("Audio generation complete!");
+
+            // Done
             System.out.println("Translation complete! Output saved to: " + settings.getOutputAudioFile());
         } catch (Exception e) {
             System.err.println("Error processing file: " + e.getMessage());
@@ -44,141 +75,6 @@ public class MediaTranslator {
         }
     }
 
-    public static void processMediaFile(Settings settings) throws Exception {
-        // Original audio to transcription
-        String transcribedText = transcribeAudioWithWhisper(settings);
-        System.out.println("Transcription complete: " + transcribedText.substring(0, Math.min(100, transcribedText.length())) + "...");
-
-        // Optional: Enhance transcription with Ollama
-        String enhancedText = enhanceTranscriptionWithOllama(transcribedText, settings.getModel());
-        System.out.println("Transcription enhanced!");
-
-        // Translate text to target language using Ollama
-        String translatedText = translateTextWithOllama(enhancedText, settings.getInputLanguage(), settings.getOutputLanguage(), settings.getModel());
-        System.out.println("Translation complete: " + translatedText.substring(0, Math.min(100, translatedText.length())) + "...");
-
-        // Convert translated text to speech using locally installed TTS
-        generateSpeechWithLocalTTS(translatedText, settings.getOutputLanguage(), settings.getOutputAudioFile());
-        System.out.println("Audio generation complete!");
-    }
-
-    private static String transcribeAudioWithWhisper(Settings settings) throws IOException, InterruptedException {
-        // Create the initial prompt with context and word hints
-        createInitialPromptFile(settings);
-
-        // Run Whisper locally using whisper.cpp or whisper.cpp command line
-        // Alternatively, one could use the OpenAI Whisper model locally through a wrapper
-        List<String> command = new ArrayList<>();
-
-        command.add(settings.getWhisperPath());
-        command.add("--model");
-        command.add(settings.getWhisperModel());  // Use base model for better performance
-        command.add("--language");
-        command.add(settings.getInputLanguage());
-        command.add("--output-json");
-        command.add("--output-file");
-        command.add(settings.getOutputTranscriptFile().replace(".json", ""));
-        // Add initial prompt
-        command.add("--prompt");
-        command.add(new String(Files.readAllBytes(Paths.get(settings.getOutputPromptFile())), StandardCharsets.UTF_8));
-        // Add word timestamp tokens to help with word alignment
-        //command.add("--word-timestamps");
-        //command.add("true");
-        command.add(settings.getInputAudioFile());
-
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(true);
-        Process process = pb.start();
-
-        // Log output for debugging
-        BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-        String line;
-        while ((line = reader.readLine()) != null) {
-            System.out.println("Whisper: " + line);
-        }
-
-        int exitCode = process.waitFor();
-        if (exitCode != 0) {
-            // Fallback to using a Python script with Whisper if direct command failed
-            System.err.println("Whisper ailed, error: " + exitCode);
-        } else {
-            System.out.println("Whisper finished");
-        }
-
-        // Read the JSON output file
-        String jsonContent = new String(Files.readAllBytes(Paths.get(settings.getOutputTranscriptFile())), StandardCharsets.UTF_8);
-        JSONObject json = new JSONObject(jsonContent);
-
-        // Extract the transcribed text from the JSON
-        return json.getString("text");
-    }
-
-    private static void createInitialPromptFile(Settings settings) throws IOException {
-        // Create a context-rich prompt
-        StringBuilder prompt = new StringBuilder();
-        prompt.append("This is a tech podcast about Java and software development. ");
-        prompt.append("The podcast is called Foojay Podcast.");
-        prompt.append("It frequently mentions people and technologies including: ");
-        prompt.append(settings.getWordHints());
-        prompt.append(". ");
-        // Add any specific context about the current episode if available
-        String episodeContext = settings.getEpisodeContext();
-        if (!episodeContext.isEmpty()) {
-            prompt.append(episodeContext);
-        }
-
-        Files.write(Paths.get(settings.getOutputPromptFile()), prompt.toString().getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String enhanceTranscriptionWithOllama(String rawTranscription, String model) throws IOException {
-        String prompt = "You are an expert in enhancing and cleaning up transcribed text. " +
-                "Fix any grammatical errors, improve punctuation, and make the text more readable while " +
-                "preserving the original meaning. Here is the transcribed text:\n\n" + rawTranscription;
-
-        return callOllama(prompt, model);
-    }
-
-    private static String translateTextWithOllama(String text, String sourceLanguage, String targetLanguage, String model) throws IOException {
-        String prompt = "Translate the following " + getLanguageName(sourceLanguage) + " text to " +
-                getLanguageName(targetLanguage) + ". Ensure the translation is natural and preserves the original meaning.\n\n" +
-                "Text to translate:\n" + text + "\n\n" +
-                "Translation in " + getLanguageName(targetLanguage) + ":";
-
-        return callOllama(prompt, model);
-    }
-
-    private static String callOllama(String prompt, String model) throws IOException {
-        URL url = new URL("http://localhost:11434/api/generate");
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-        connection.setRequestMethod("POST");
-        connection.setRequestProperty("Content-Type", "application/json");
-        connection.setDoOutput(true);
-
-        // Create request body
-        JSONObject requestBody = new JSONObject();
-        requestBody.put("model", model);
-        requestBody.put("prompt", prompt);
-        requestBody.put("stream", false);
-
-        // Send request
-        try (OutputStream os = connection.getOutputStream()) {
-            byte[] input = requestBody.toString().getBytes(StandardCharsets.UTF_8);
-            os.write(input, 0, input.length);
-        }
-
-        // Read response
-        StringBuilder response = new StringBuilder();
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
-            String responseLine;
-            while ((responseLine = br.readLine()) != null) {
-                response.append(responseLine.trim());
-            }
-        }
-
-        // Parse JSON response
-        JSONObject jsonResponse = new JSONObject(response.toString());
-        return jsonResponse.getString("response");
-    }
 
     private static void generateSpeechWithLocalTTS(String text, String language, String outputFilePath) throws IOException, InterruptedException {
         // Determine which TTS system to use based on what's available
@@ -471,32 +367,6 @@ public class MediaTranslator {
         }
     }
 
-    private static String getLanguageName(String languageCode) {
-        // Convert ISO language code to full language name
-        switch (languageCode.toLowerCase()) {
-            case "en":
-                return "English";
-            case "fr":
-                return "French";
-            case "es":
-                return "Spanish";
-            case "de":
-                return "German";
-            case "it":
-                return "Italian";
-            case "pt":
-                return "Portuguese";
-            case "ru":
-                return "Russian";
-            case "zh":
-                return "Chinese";
-            case "ja":
-                return "Japanese";
-            default:
-                return languageCode;
-        }
-    }
-
     private static boolean isCommandAvailable(String command) {
         try {
             ProcessBuilder pb;
@@ -519,19 +389,6 @@ public class MediaTranslator {
             pb.redirectErrorStream(true);
             Process process = pb.start();
             return process.waitFor() == 0;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private static boolean isOllamaRunning() {
-        try {
-            URL url = new URL("http://localhost:11434/api/version");
-            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(1000);
-            connection.connect();
-            return connection.getResponseCode() == 200;
         } catch (Exception e) {
             return false;
         }

@@ -33,10 +33,14 @@ no cloud services.
 2. Pull a model for translation and text enhancement:
    ```
    ollama pull mistral    # Basic, fast model
-   ollama pull llama2     # Alternative option
+   ollama pull llama3     # Alternative option
    ollama pull mixtral    # More capable for complex tasks
    ```
 3. Ensure the Ollama service is running before using the application
+4. Check the model is available:
+   ```
+   ollama list
+   ```
 
 ## Building and Running the Application
 
