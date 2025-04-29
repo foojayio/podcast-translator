@@ -35,7 +35,7 @@ public class MediaTranslator {
 
             // Process the file
             processMediaFile(settings);
-            System.out.println("Translation complete! Output saved to: " + settings.getOutputFile());
+            System.out.println("Translation complete! Output saved to: " + settings.getOutputAudioFile());
         } catch (Exception e) {
             System.err.println("Error processing file: " + e.getMessage());
             e.printStackTrace();
@@ -45,72 +45,46 @@ public class MediaTranslator {
     }
 
     public static void processMediaFile(Settings settings) throws Exception {
-        // Step 1: Extract audio from file if MP4, or use directly if MP3
-        String audioFilePath = extractAudioIfNeeded(settings.getInputFile());
-        System.out.println("Audio preparation complete!");
-
-        // Step 2: Transcribe audio to text using Whisper
-        String transcribedText = transcribeAudioWithWhisper(audioFilePath, settings.getInputLanguage());
+        // Original audio to transcription
+        String transcribedText = transcribeAudioWithWhisper(settings);
         System.out.println("Transcription complete: " + transcribedText.substring(0, Math.min(100, transcribedText.length())) + "...");
 
         // Optional: Enhance transcription with Ollama
         String enhancedText = enhanceTranscriptionWithOllama(transcribedText, settings.getModel());
         System.out.println("Transcription enhanced!");
 
-        // Step 3: Translate text to target language using Ollama
+        // Translate text to target language using Ollama
         String translatedText = translateTextWithOllama(enhancedText, settings.getInputLanguage(), settings.getOutputLanguage(), settings.getModel());
         System.out.println("Translation complete: " + translatedText.substring(0, Math.min(100, translatedText.length())) + "...");
 
-        // Step 4: Convert translated text to speech using locally installed TTS
-        generateSpeechWithLocalTTS(translatedText, settings.getOutputLanguage(), settings.getOutputFile());
+        // Convert translated text to speech using locally installed TTS
+        generateSpeechWithLocalTTS(translatedText, settings.getOutputLanguage(), settings.getOutputAudioFile());
         System.out.println("Audio generation complete!");
     }
 
-    private static String extractAudioIfNeeded(String inputFilePath) throws Exception {
-        File inputFile = new File(inputFilePath);
-        String extension = getFileExtension(inputFilePath).toLowerCase();
-
-        if ("mp3".equals(extension)) {
-            return inputFilePath; // No extraction needed
-        } else if ("mp4".equals(extension)) {
-            // Extract audio from MP4 using FFmpeg
-            String outputAudioPath = inputFile.getParent() + File.separator +
-                    inputFile.getName().replace(".mp4", "_extracted.mp3");
-
-            // Use FFmpeg to extract audio
-            ProcessBuilder pb = new ProcessBuilder(
-                    "ffmpeg", "-i", inputFilePath, "-q:a", "0", "-map", "a", outputAudioPath
-            );
-            Process process = pb.start();
-            int exitCode = process.waitFor();
-
-            if (exitCode != 0) {
-                throw new IOException("FFmpeg process failed with exit code " + exitCode);
-            }
-
-            return outputAudioPath;
-        } else {
-            throw new IllegalArgumentException("Unsupported file format: " + extension);
-        }
-    }
-
-    private static String transcribeAudioWithWhisper(String audioFilePath, String sourceLanguage) throws IOException, InterruptedException {
-        // Create a temporary file for output
-        String outputJsonPath = audioFilePath + ".json";
+    private static String transcribeAudioWithWhisper(Settings settings) throws IOException, InterruptedException {
+        // Create the initial prompt with context and word hints
+        createInitialPromptFile(settings);
 
         // Run Whisper locally using whisper.cpp or whisper.cpp command line
         // Alternatively, one could use the OpenAI Whisper model locally through a wrapper
         List<String> command = new ArrayList<>();
 
-        command.add(WHISPER_PATH);
+        command.add(settings.getWhisperPath());
         command.add("--model");
-        command.add(WHISPER_MODEL);  // Use base model for better performance
+        command.add(settings.getWhisperModel());  // Use base model for better performance
         command.add("--language");
-        command.add(sourceLanguage);
+        command.add(settings.getInputLanguage());
         command.add("--output-json");
         command.add("--output-file");
-        command.add(outputJsonPath);
-        command.add(audioFilePath);
+        command.add(settings.getOutputTranscriptFile().replace(".json", ""));
+        // Add initial prompt
+        command.add("--prompt");
+        command.add(new String(Files.readAllBytes(Paths.get(settings.getOutputPromptFile())), StandardCharsets.UTF_8));
+        // Add word timestamp tokens to help with word alignment
+        //command.add("--word-timestamps");
+        //command.add("true");
+        command.add(settings.getInputAudioFile());
 
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
@@ -126,68 +100,34 @@ public class MediaTranslator {
         int exitCode = process.waitFor();
         if (exitCode != 0) {
             // Fallback to using a Python script with Whisper if direct command failed
-            System.out.println("Direct Whisper command failed, falling back to Python script...");
-            return transcribeWithWhisperPython(audioFilePath, sourceLanguage);
+            System.err.println("Whisper ailed, error: " + exitCode);
+        } else {
+            System.out.println("Whisper finished");
         }
 
         // Read the JSON output file
-        String jsonContent = new String(Files.readAllBytes(Paths.get(outputJsonPath)), StandardCharsets.UTF_8);
+        String jsonContent = new String(Files.readAllBytes(Paths.get(settings.getOutputTranscriptFile())), StandardCharsets.UTF_8);
         JSONObject json = new JSONObject(jsonContent);
-
-        // Clean up temporary file
-        Files.deleteIfExists(Paths.get(outputJsonPath));
 
         // Extract the transcribed text from the JSON
         return json.getString("text");
     }
 
-    private static String transcribeWithWhisperPython(String audioFilePath, String sourceLanguage) throws IOException, InterruptedException {
-        // Create a Python script to use Whisper
-        String scriptPath = "whisper_script.py";
-        String scriptContent =
-                "import sys\n" +
-                        "import whisper\n" +
-                        "import json\n" +
-                        "\n" +
-                        "audio_path = sys.argv[1]\n" +
-                        "language = sys.argv[2]\n" +
-                        "\n" +
-                        "# Load Whisper model\n" +
-                        "model = whisper.load_model(\"base\")\n" +
-                        "\n" +
-                        "# Transcribe audio\n" +
-                        "result = model.transcribe(audio_path, language=language)\n" +
-                        "\n" +
-                        "# Print the result as JSON\n" +
-                        "print(json.dumps({\"text\": result[\"text\"]}))\n";
-
-        Files.write(Paths.get(scriptPath), scriptContent.getBytes());
-
-        // Run the Python script
-        ProcessBuilder pb = new ProcessBuilder("python", scriptPath, audioFilePath, sourceLanguage);
-        pb.redirectErrorStream(true);
-        Process process = pb.start();
-
-        // Collect output
-        StringBuilder output = new StringBuilder();
-        BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-        String line;
-        while ((line = reader.readLine()) != null) {
-            output.append(line).append("\n");
+    private static void createInitialPromptFile(Settings settings) throws IOException {
+        // Create a context-rich prompt
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("This is a tech podcast about Java and software development. ");
+        prompt.append("The podcast is called Foojay Podcast.");
+        prompt.append("It frequently mentions people and technologies including: ");
+        prompt.append(settings.getWordHints());
+        prompt.append(". ");
+        // Add any specific context about the current episode if available
+        String episodeContext = settings.getEpisodeContext();
+        if (!episodeContext.isEmpty()) {
+            prompt.append(episodeContext);
         }
 
-        int exitCode = process.waitFor();
-        if (exitCode != 0) {
-            throw new IOException("Python Whisper script failed with exit code " + exitCode);
-        }
-
-        // Clean up script
-        Files.deleteIfExists(Paths.get(scriptPath));
-
-        // Parse JSON output
-        String jsonOutput = output.toString().trim();
-        JSONObject json = new JSONObject(jsonOutput);
-        return json.getString("text");
+        Files.write(Paths.get(settings.getOutputPromptFile()), prompt.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private static String enhanceTranscriptionWithOllama(String rawTranscription, String model) throws IOException {

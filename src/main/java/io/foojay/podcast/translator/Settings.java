@@ -44,12 +44,20 @@ public class Settings {
     }
 
     // Replace the constants with property getters
-    public String getInputFile() {
-        return settings.getProperty("input.file");
+    public String getInputAudioFile() {
+        return settings.getProperty("input.audio.file");
     }
 
-    public String getOutputFile() {
-        return settings.getProperty("output.file");
+    public String getOutputPromptFile() {
+        return settings.getProperty("output.prompt.file");
+    }
+
+    public String getOutputTranscriptFile() {
+        return settings.getProperty("output.transcript.file");
+    }
+
+    public String getOutputAudioFile() {
+        return settings.getProperty("output.audio.file");
     }
 
     public String getInputLanguage() {
@@ -70,5 +78,13 @@ public class Settings {
 
     public String getWhisperModel() {
         return settings.getProperty("whisper.model");
+    }
+
+    public String getWordHints() {
+        return settings.getProperty("word.hints");
+    }
+
+    public String getEpisodeContext() {
+        return settings.getProperty("episode.context");
     }
 }
